@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  swarm-defense:
+    build: .
+    container_name: aegis-swarm-defense
+    volumes:
+      # Bind local sandbox for inspectability on host machine
+      - ./sandbox:/app/sandbox
+    tty: true
+    stdin_open: true
+    restart: unless-stopped

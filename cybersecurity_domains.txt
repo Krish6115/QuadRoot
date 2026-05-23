@@ -1,0 +1,36 @@
+Integrated low-level compiler design (Flex/Bison) with Generative AI
+Built a fail-safe analyzer that extracts insights even from erroneous code
+Designed a multi-agent system for optimization, explanation, and comments
+Developed a modern UI for visualizing AST/CST and improving learning
+
+
+50 problem statements 
+10 security domains
+each domain 5 problems
+3 easy medium(more than 3 hours) difficult 
+2 tracks -offensive(red team) defensive (blue team)
+45 tools 
+myter attacksresponse startgies
+att@ck -
+owasp
+50 -industry level
+architecture types 
+myter attack will be given 
+challenge should be read throughly 
+deliverables- what must be demonstarted at the end 
+team roles 
+techstack 
+
+1.iam-identity access management(important) 
+
+2.netwrok security and traffic anaalyssi(all cryptograoic allgorithms)
+
+3.cloud security
+4.web application security
+5.endpoint and host security (sensorsand hadware devices fog comuting)
+6.threat detection and siem engineering(important)
+7.cryptograohy and data protection 
+8.container and kubernetes security
+9.ot and iot and critical infrastructure 
+10.incidence resonse and digital fo
+

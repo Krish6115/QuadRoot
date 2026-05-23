@@ -42,12 +42,176 @@ USAGE:
 import os       # os — Filesystem operations: path joining, existence checks, directory creation
 import time     # time — High-resolution timing for mitigation latency measurement
 import psutil   # psutil — Cross-platform process and system utilities
+import json     # json — Serialization for the Live API server
+import threading # threading — Concurrent background server execution
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # watchdog — Cross-platform filesystem event monitoring library
-# Observer: Background thread that hooks into OS kernel file notification APIs
-# FileSystemEventHandler: Base class for defining callbacks on file events
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEventHandler
+
+# ====================================================================
+# CONFIGURATION CONSTANTS & GLOBAL LIVE STATE
+# ====================================================================
+
+SANDBOX_DIR = "./sandbox"
+CANARY_FILE = os.path.join(SANDBOX_DIR, "000_urgent_salary_audit.xlsx")
+
+ACTIVE_HANDLER = None  # Tracks the instantiated watchdog callback to allow runtime resets
+
+# LIVE_STATE: In-memory live telemetry and logs database synchronized in real-time
+# with the React front-end dashboard to visualize actual filesystem changes.
+LIVE_STATE = {
+    "status": "MONITORING",
+    "attacker_pid": "OFFLINE",
+    "mitigation_latency": "N/A",
+    "logs": [
+        {"timestamp": time.strftime("%H:%M:%S"), "level": "INFO", "source": "SYSTEM", "message": "Multi-Agent Swarm Defense Daemon active."},
+        {"timestamp": time.strftime("%H:%M:%S"), "level": "INFO", "source": "ARGUS", "message": "Canary decoy file deployed to protected namespace."},
+        {"timestamp": time.strftime("%H:%M:%S"), "level": "INFO", "source": "PHINEAS", "message": "Wazuh FIM active. Standing by..."}
+    ],
+    "ipc_logs": [
+        {"sender": "SYSTEM", "message": "Autonomous Swarm EDR standing by...", "colorClass": "text-muted"},
+        {"sender": "ARGUS", "message": "Canary Honey-pot trap placed alphabetically first.", "colorClass": "argus-color"},
+        {"sender": "PHINEAS", "message": "ReadDirectoryChangesW hook successfully mounted.", "colorClass": "phineas-color"}
+    ],
+    "kills": 0
+}
+
+
+def get_sandbox_files():
+    """Scans ./sandbox dynamically and formats the output for the React SPA dashboard."""
+    if not os.path.exists(SANDBOX_DIR):
+        return []
+    
+    files = os.listdir(SANDBOX_DIR)
+    file_list = []
+    seen = set()
+    
+    # 1. Identify all locked files
+    for f in files:
+        if f.endswith('.locked'):
+            orig_name = f[:-7] # Remove .locked suffix
+            seen.add(orig_name)
+            file_list.append({
+                "id": len(file_list) + 1,
+                "name": orig_name,
+                "path": os.path.join(SANDBOX_DIR, f),
+                "type": "canary" if orig_name.startswith("000_") else "user",
+                "status": "locked"
+            })
+            
+    # 2. Identify clean or preserved files
+    for f in files:
+        if f.endswith('.locked'):
+            continue
+        if f in seen:
+            continue
+        
+        file_list.append({
+            "id": len(file_list) + 1,
+            "name": f,
+            "path": os.path.join(SANDBOX_DIR, f),
+            "type": "canary" if f.startswith("000_") else "user",
+            "status": "clean" if LIVE_STATE["status"] != "MITIGATED" else "preserved"
+        })
+        
+    return sorted(file_list, key=lambda x: x["name"])
+
+
+class APIServerHandler(BaseHTTPRequestHandler):
+    """API Server Handler resolving local cross-origin HTTP requests from React SPA dashboard."""
+    def _set_headers(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'application/json')
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header('Access-Control-Allow-Origin', '*')
+        self.send_header('Access-Control-Allow-Methods', 'GET, OPTIONS')
+        self.send_header('Access-Control-Allow-Headers', 'Content-Type')
+        self.end_headers()
+
+    def do_GET(self):
+        if self.path == '/api/status':
+            self._set_headers()
+            response = {
+                "status": LIVE_STATE["status"],
+                "pid": LIVE_STATE["attacker_pid"],
+                "latency": LIVE_STATE["mitigation_latency"],
+                "logs": LIVE_STATE["logs"],
+                "ipc_logs": LIVE_STATE["ipc_logs"],
+                "kills": LIVE_STATE["kills"]
+            }
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+        elif self.path == '/api/files':
+            self._set_headers()
+            response = get_sandbox_files()
+            self.wfile.write(json.dumps(response).encode('utf-8'))
+        elif self.path == '/api/reset':
+            # Reset global LIVE_STATE variables
+            global LIVE_STATE
+            LIVE_STATE["status"] = "MONITORING"
+            LIVE_STATE["attacker_pid"] = "OFFLINE"
+            LIVE_STATE["mitigation_latency"] = "N/A"
+            LIVE_STATE["logs"] = [
+                {"timestamp": time.strftime("%H:%M:%S"), "level": "INFO", "source": "SYSTEM", "message": "Multi-Agent Swarm Defense Daemon reset successfully."},
+                {"timestamp": time.strftime("%H:%M:%S"), "level": "INFO", "source": "ARGUS", "message": "Canary decoy file deployed to protected namespace."},
+                {"timestamp": time.strftime("%H:%M:%S"), "level": "INFO", "source": "PHINEAS", "message": "Wazuh FIM active. Standing by..."}
+            ]
+            LIVE_STATE["ipc_logs"] = [
+                {"sender": "SYSTEM", "message": "Autonomous Swarm EDR standing by...", "colorClass": "text-muted"},
+                {"sender": "ARGUS", "message": "Canary Honey-pot trap placed alphabetically first.", "colorClass": "argus-color"},
+                {"sender": "PHINEAS", "message": "ReadDirectoryChangesW hook successfully mounted.", "colorClass": "phineas-color"}
+            ]
+            
+            # Restore sandbox files dynamically
+            try:
+                # 1. Clean existing locked and residual files
+                if os.path.exists(SANDBOX_DIR):
+                    for f in os.listdir(SANDBOX_DIR):
+                        os.remove(os.path.join(SANDBOX_DIR, f))
+                else:
+                    os.makedirs(SANDBOX_DIR)
+                
+                # 2. Re-create clean documents
+                dummy_files = {
+                    "financial_report.xlsx":      "CONFIDENTIAL FINANCIAL AUDIT: $4.2M OPEX REPORT",
+                    "customer_database.sql":      "SELECT * FROM corporate_customers WHERE credit_limit > 500000;",
+                    "product_roadmap.pdf":        "INTERNAL PRODUCT STRATEGY // AEGIS PLATFORM VERSION 5.0",
+                    "intellectual_property.key":  "CERTIFICATE AUTHORITY SYMMETRIC PRIVKEY: 0x82A1B7E3",
+                    "api_secrets.env":            "DATABASE_URL=postgresql://db_admin:supersecurepwd@localhost:5432/prod"
+                }
+                for name, content in dummy_files.items():
+                    with open(os.path.join(SANDBOX_DIR, name), "w") as f:
+                        f.write(content)
+
+                # 3. Deploy fresh canary trap
+                with open(CANARY_FILE, "w") as f:
+                    f.write("CANARY DATA: DO NOT ACCESS OR MODIFY. ENCRYPTED FIELD AUDIT VAL: 0x93FA1")
+                    
+                print("[SYSTEM] Received remote reset request from UI. Sandbox successfully restored.")
+            except Exception as e:
+                print(f"[ERROR] Remote UI sandbox reset failed: {e}")
+
+            # Reset the mitigation flag on the active watchdog handler
+            global ACTIVE_HANDLER
+            if ACTIVE_HANDLER:
+                ACTIVE_HANDLER.mitigated = False
+            
+            self._set_headers()
+            self.wfile.write(json.dumps({"status": "success", "message": "Sandbox reset completed."}).encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, format, *args):
+        # Suppress standard HTTP access logs to prevent polluting Command Prompt output
+        pass
 
 # ====================================================================
 # CONFIGURATION CONSTANTS
@@ -117,8 +281,6 @@ class AnomalyHandler(FileSystemEventHandler):
             return
 
         # Normalize both paths to absolute form for reliable comparison
-        # This prevents false negatives from relative vs absolute path mismatches
-        # (e.g., "./sandbox/file.xlsx" vs "C:\Users\...\sandbox\file.xlsx")
         normalized_event_path = os.path.abspath(event.src_path)
         normalized_canary_path = os.path.abspath(CANARY_FILE)
 
@@ -126,6 +288,21 @@ class AnomalyHandler(FileSystemEventHandler):
         if normalized_event_path == normalized_canary_path:
             # Record the exact timestamp for latency calculation
             start_time = time.time()
+
+            # Record event in global LIVE_STATE for the React SPA dashboard
+            timestamp = time.strftime("%H:%M:%S")
+            LIVE_STATE["status"] = "ALERTING"
+            LIVE_STATE["logs"].append({
+                "timestamp": timestamp,
+                "level": "ERROR",
+                "source": "Wazuh EDR",
+                "message": f"ALERT [Level 15] FIM integrity violation at Canary path: {event.src_path}"
+            })
+            LIVE_STATE["ipc_logs"].append({
+                "sender": "PHINEAS",
+                "message": f"ALERT! Canary file modified. Triggering swarming intrusion event!",
+                "colorClass": "phineas-color"
+            })
 
             # Display Wazuh-style Level 15 FIM Alert
             print("\n" + "=" * 60)
@@ -140,49 +317,26 @@ class AnomalyHandler(FileSystemEventHandler):
         """
         HERMES Agent — Automated Process Termination Engine
         ====================================================
-        
-        This method simulates what an enterprise SOAR (Security Orchestration,
-        Automation, and Response) platform does when receiving a critical alert:
-        
-        1. Enumerate all running processes on the system
-        2. Identify the malicious process by matching command-line arguments
-        3. Extract its Process ID (PID)
-        4. Dispatch a hard SIGKILL signal to immediately terminate it
-        5. Calculate and report the total detection-to-kill latency
-        
-        How psutil.process_iter() works internally:
-            - On Linux:  Reads /proc/<pid>/cmdline for each running process
-            - On Windows: Calls OpenProcess() + QueryFullProcessImageName() APIs
-            - Returns a generator yielding Process objects with requested attributes
-        
-        How process.kill() works internally:
-            - On Linux:  Sends SIGKILL (signal 9) via kill() syscall
-            - On Windows: Calls TerminateProcess() via kernel32.dll
-            - SIGKILL cannot be caught, blocked, or ignored by the target process
-            - The process is terminated immediately at the kernel level
-        
-        Args:
-            start_time (float): The time.time() value when the canary was triggered,
-                               used to calculate total mitigation latency in milliseconds
         """
         # Set flag to prevent re-entry
         self.mitigated = True
         print("[HERMES] Dispatching process-mitigation protocols...")
 
+        LIVE_STATE["ipc_logs"].append({
+            "sender": "HERMES",
+            "message": "Mitigation interceptor active. Preparing SIGKILL vector.",
+            "colorClass": "hermes-color"
+        })
+
         # Scan all active system processes to find the ransomware simulator
         attacker_pid = None
         for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
             try:
-                # proc.info['cmdline'] returns a list of command-line arguments
-                # Example: ['python', 'attacker.py'] or ['python3', './attacker.py']
                 cmd = proc.info['cmdline']
                 if cmd and any('attacker.py' in part for part in cmd):
                     attacker_pid = proc.info['pid']
                     break
             except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
-                # NoSuchProcess:  Process ended between iteration and access
-                # AccessDenied:   System process we don't have permission to read
-                # ZombieProcess:  Process has terminated but hasn't been reaped
                 continue
 
         if attacker_pid:
@@ -191,14 +345,45 @@ class AnomalyHandler(FileSystemEventHandler):
                 process = psutil.Process(attacker_pid)
 
                 # SIGKILL — Hard kill the ransomware process immediately
-                # This is the most aggressive termination method available.
-                # The process receives no chance to clean up, flush buffers,
-                # or continue encrypting files.
                 process.kill()
 
                 # Calculate the total latency from canary trigger to process death
-                # This is measured in milliseconds for precision
                 latency = (time.time() - start_time) * 1000
+
+                # Update live state upon successful mitigation!
+                timestamp = time.strftime("%H:%M:%S")
+                LIVE_STATE["status"] = "MITIGATED"
+                LIVE_STATE["attacker_pid"] = str(attacker_pid)
+                LIVE_STATE["mitigation_latency"] = f"{latency:.2f}ms"
+                LIVE_STATE["kills"] += 1
+                
+                LIVE_STATE["logs"].append({
+                    "timestamp": timestamp,
+                    "level": "SUCCESS",
+                    "source": "HERMES",
+                    "message": f"EDR interrupt caught. Executing task: psutil.kill({attacker_pid}, SIGKILL)"
+                })
+                LIVE_STATE["logs"].append({
+                    "timestamp": timestamp,
+                    "level": "SUCCESS",
+                    "source": "HERMES",
+                    "message": f"Malicious Process ID {attacker_pid} terminated successfully. Latency: {latency:.2f}ms."
+                })
+                LIVE_STATE["ipc_logs"].append({
+                    "sender": "HERMES",
+                    "message": f"SIGKILL dispatched to process {attacker_pid}. Threat vector closed in {latency:.2f}ms.",
+                    "colorClass": "hermes-color"
+                })
+                LIVE_STATE["ipc_logs"].append({
+                    "sender": "ARES",
+                    "message": "SIGKILL interrupt caught. Process context destroyed. Core dumped.",
+                    "colorClass": "ares-color"
+                })
+                LIVE_STATE["ipc_logs"].append({
+                    "sender": "ARGUS",
+                    "message": "Decoy canary engagement successful. Threat isolated successfully.",
+                    "colorClass": "argus-color"
+                })
 
                 print(f"[SUCCESS] HERMES terminated process PID: {attacker_pid} (attacker.py)")
                 print(f"[SUCCESS] Mitigation Latency: {latency:.2f} ms")
@@ -207,8 +392,13 @@ class AnomalyHandler(FileSystemEventHandler):
                 print(f"[ERROR] Failed to terminate ransomware PID {attacker_pid}: {e}")
         else:
             # This case occurs if the attacker process already exited naturally
-            # or if its name doesn't contain 'attacker.py'
             print("[WARNING] Anomaly flagged, but no active 'attacker.py' process was discovered.")
+            LIVE_STATE["status"] = "MONITORING"
+            LIVE_STATE["ipc_logs"].append({
+                "sender": "HERMES",
+                "message": "Anomaly flagged, but no active 'attacker.py' process was discovered.",
+                "colorClass": "text-muted"
+            })
 
         print("=" * 60 + "\n")
 
@@ -250,25 +440,19 @@ def setup_environment():
         print(f"[ARGUS] Placed moving-target canary trap: {CANARY_FILE}")
 
 
+def run_api_server():
+    """Runs a lightweight local HTTP API server supporting live telemetry endpoints."""
+    try:
+        server_address = ('', 5000)
+        httpd = HTTPServer(server_address, APIServerHandler)
+        httpd.serve_forever()
+    except Exception as e:
+        print(f"[SYSTEM] Local API server error: {e}")
+
+
 def main():
     """
     Main daemon entry point — orchestrates the complete defense system.
-    
-    Execution flow:
-        1. Print system banner
-        2. Call setup_environment() to create sandbox and place canary
-        3. Create an AnomalyHandler instance (our FIM callback)
-        4. Create a watchdog Observer and schedule it to watch SANDBOX_DIR
-        5. Start the Observer (spawns a background thread)
-        6. Enter an infinite sleep loop (the Observer thread does all the work)
-        7. On Ctrl+C, gracefully stop the Observer and exit
-    
-    The Observer thread runs independently from the main thread:
-        Main Thread:  Sleeps in while True loop (keeps process alive)
-        Observer Thread: Watches for OS kernel file notifications
-        
-    When a file change occurs:
-        OS Kernel → Observer Thread → AnomalyHandler.on_modified() → mitigate()
     """
     print("=" * 60)
     print("      AEGIS // MULTI-AGENT SWARM DEFENSE DEAMON ACTIVE      ")
@@ -277,9 +461,15 @@ def main():
     # Phase 1: ARGUS — Setup environment and deploy canary
     setup_environment()
 
+    # Start the local API server in a background thread to sync with the React UI
+    api_thread = threading.Thread(target=run_api_server, daemon=True)
+    api_thread.start()
+
     # Phase 2: PHINEAS — Initialize Wazuh FIM monitoring
     # Create the event handler that will receive file change notifications
+    global ACTIVE_HANDLER
     event_handler = AnomalyHandler()
+    ACTIVE_HANDLER = event_handler
 
     # Create the Observer — this is the core watchdog monitoring engine
     # Internally, it creates a platform-specific emitter:

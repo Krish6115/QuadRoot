@@ -168,6 +168,130 @@ function App() {
     };
   }, []);
 
+  const [backendOnline, setBackendOnline] = useState(false);
+
+  // Poll local python API server to detect if daemon is running
+  useEffect(() => {
+    let checkInterval = null;
+
+    const checkBackend = async () => {
+      try {
+        const res = await fetch('http://localhost:5000/api/status');
+        if (res.ok) {
+          setBackendOnline(true);
+        } else {
+          setBackendOnline(false);
+        }
+      } catch (err) {
+        setBackendOnline(false);
+      }
+    };
+
+    checkBackend();
+    checkInterval = setInterval(checkBackend, 1500);
+
+    return () => {
+      if (checkInterval) clearInterval(checkInterval);
+    };
+  }, []);
+
+  // Sync state from Python Backend in Real-time if online
+  useEffect(() => {
+    if (!backendOnline) return;
+
+    let pollInterval = null;
+
+    const pollBackend = async () => {
+      try {
+        // 1. Fetch live folder files from sandbox
+        const filesRes = await fetch('http://localhost:5000/api/files');
+        if (filesRes.ok) {
+          const filesData = await filesRes.json();
+          // Map file elements
+          const mappedFiles = filesData.map(f => ({
+            id: f.id,
+            name: f.name,
+            path: f.path,
+            type: f.type,
+            status: f.status
+          }));
+          setFiles(mappedFiles);
+        }
+
+        // 2. Fetch live metrics, process information, and log traces
+        const statusRes = await fetch('http://localhost:5000/api/status');
+        if (statusRes.ok) {
+          const statusData = await statusRes.json();
+          
+          setPid(statusData.pid);
+          
+          // Count active parameters
+          const lockedFiles = statusData.logs.filter(l => l.level === 'WARNING' || l.message.includes('encrypted')).length;
+          const preservedFiles = statusData.logs.filter(l => l.level === 'SUCCESS' || l.message.includes('terminated') || l.message.includes('preserved')).length;
+          
+          let dashboardStatus = 'LIVE SYSTEM MONITORING';
+          if (statusData.status === 'MITIGATED') {
+            dashboardStatus = 'ACTIVE SWARM DEFENSE MITIGATED THREAT';
+          } else if (statusData.status === 'ALERTING') {
+            dashboardStatus = 'WARNING: FIM ALARM ACTIVE';
+          } else if (statusData.pid !== 'OFFLINE') {
+            dashboardStatus = 'ATTACK SEQUENTIAL RUNNING';
+          }
+
+          setMetrics(prev => ({
+            ...prev,
+            status: dashboardStatus,
+            latency: statusData.latency,
+            locked: lockedFiles,
+            preserved: preservedFiles > 0 ? preservedFiles : statusData.status === 'MITIGATED' ? 5 : 0,
+            efficiency: statusData.status === 'MITIGATED' ? 83 : 0
+          }));
+
+          if (statusData.logs && statusData.logs.length > 0) {
+            setElkLogs(statusData.logs);
+          }
+          if (statusData.ipc_logs && statusData.ipc_logs.length > 0) {
+            setIpcLogs(statusData.ipc_logs);
+          }
+
+          // Update agent states
+          if (statusData.status === 'MITIGATED') {
+            setAgentStates({
+              ares: { status: 'TERMINATED', task: 'Process SIGKILLed by Hermes', iops: 0, locked: lockedFiles },
+              argus: { status: 'COMPLETED', task: 'Canary trap successfully engaged', decoys: 1, latency: '4.2ms' },
+              phineas: { status: 'SECURED', task: 'EDR Alert fired, threat quarantined', alerts: 1, fimStatus: 'Threat Quarantined' },
+              hermes: { status: 'COMPLETED', task: 'Executed SIGKILL on malicious process', latency: statusData.latency, kills: statusData.kills },
+            });
+            setSimRunning(false);
+          } else if (statusData.status === 'ALERTING') {
+            setAgentStates(prev => ({
+              ...prev,
+              phineas: { status: 'ALERTING', task: 'INTEGRITY DECOY COMPROMISED!', alerts: 1, fimStatus: 'FIM Alerting' }
+            }));
+            setSimRunning(true);
+          } else {
+            setAgentStates({
+              ares: { status: statusData.pid !== 'OFFLINE' ? 'ACTIVE' : 'IDLE', task: statusData.pid !== 'OFFLINE' ? 'Encrypting directory' : 'Standing by', iops: statusData.pid !== 'OFFLINE' ? 12 : 0, locked: lockedFiles },
+              argus: { status: 'DEPLOYED', task: 'Canary trap armed alphabetically first', decoys: 1, latency: 'N/A' },
+              phineas: { status: 'MONITORING', task: 'Wazuh FIM active. Watching directory.', alerts: 0, fimStatus: 'FIM Active' },
+              hermes: { status: 'MONITORING', task: 'Standing by for containment', latency: 'N/A', kills: 0 },
+            });
+            setSimRunning(statusData.pid !== 'OFFLINE');
+          }
+        }
+      } catch (err) {
+        console.error("Local API polling error", err);
+      }
+    };
+
+    pollInterval = setInterval(pollBackend, 500);
+    pollBackend();
+
+    return () => {
+      if (pollInterval) clearInterval(pollInterval);
+    };
+  }, [backendOnline]);
+
   // Helper loggers
   const addElkLog = (level, source, message) => {
     const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
@@ -207,6 +331,10 @@ function App() {
   const resetSimulation = () => {
     if (loopRef.current) clearTimeout(loopRef.current);
     loopRef.current = null;
+    
+    if (backendOnline) {
+      fetch('http://localhost:5000/api/reset').catch(err => console.error("Reset backend fail", err));
+    }
     
     setSimRunning(false);
     setPid('OFFLINE');
@@ -493,8 +621,16 @@ function App() {
         
         {/* Quick Diagnostics HUD */}
         <div className="stats-pill-container">
-          <span className="stats-pill">SOC CORE: ONLINE</span>
-          <span className="stats-pill">IPC LINK: 9092/TCP</span>
+          {backendOnline ? (
+            <span className="stats-pill stats-pill-live" style={{ border: '1px solid var(--color-green)', color: 'var(--color-green)', boxShadow: '0 0 10px rgba(74, 222, 128, 0.25)', fontWeight: 'bold' }}>
+              LIVE BACKEND: CONNECTED
+            </span>
+          ) : (
+            <span className="stats-pill" style={{ border: '1px solid rgba(255, 255, 255, 0.1)', color: '#888' }}>
+              SOC CORE: SIMULATED PREVIEW
+            </span>
+          )}
+          <span className="stats-pill">IPC LINK: 5000/TCP</span>
           <span className="stats-pill">MALWARE PID: {pid}</span>
           <span className="stats-pill">ATTACK TYPE: MITRE T1486</span>
         </div>
@@ -656,32 +792,64 @@ function App() {
 
           {/* Execution triggers */}
           <div className="pane-card" style={{ border: 'none', padding: '0', backgroundColor: 'transparent', boxShadow: 'none' }}>
-            {!simRunning ? (
-              <button 
-                className="action-btn primary-trigger"
-                onClick={startSimulation}
-              >
-                <PlayIcon />
-                RUN CYBER-SWARM DEFENSE
-              </button>
+            {backendOnline ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '100%' }}>
+                <div style={{
+                  padding: '1rem',
+                  borderRadius: 'var(--radius-md)',
+                  background: 'rgba(74, 222, 128, 0.05)',
+                  border: '1px solid rgba(74, 222, 128, 0.15)',
+                  color: 'var(--color-green)',
+                  fontSize: '0.75rem',
+                  lineHeight: '1.4',
+                  textAlign: 'center',
+                  fontWeight: '500',
+                  boxShadow: '0 0 15px rgba(74, 222, 128, 0.05)'
+                }}>
+                  🟢 LIVE TERMINAL MODE ACTIVE<br/>
+                  <span style={{ fontSize: '0.65rem', color: '#aaa', fontWeight: 'normal' }}>
+                    Run <code>python attacker.py</code> in your terminal to launch the attack!
+                  </span>
+                </div>
+                <button 
+                  className="action-btn"
+                  onClick={resetSimulation}
+                  style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}
+                >
+                  <ResetIcon />
+                  REMOTE RESET BACKEND FOLDER
+                </button>
+              </div>
             ) : (
-              <button 
-                className="action-btn stop-trigger"
-                onClick={resetSimulation}
-              >
-                <ResetIcon />
-                ABORT SIMULATION
-              </button>
-            )}
+              <>
+                {!simRunning ? (
+                  <button 
+                    className="action-btn primary-trigger"
+                    onClick={startSimulation}
+                  >
+                    <PlayIcon />
+                    RUN CYBER-SWARM DEFENSE
+                  </button>
+                ) : (
+                  <button 
+                    className="action-btn stop-trigger"
+                    onClick={resetSimulation}
+                  >
+                    <ResetIcon />
+                    ABORT SIMULATION
+                  </button>
+                )}
 
-            <button 
-              className="action-btn"
-              onClick={resetSimulation}
-              disabled={simRunning && !metrics.locked}
-            >
-              <ResetIcon />
-              INITIALIZE & RESET SYSTEM
-            </button>
+                <button 
+                  className="action-btn"
+                  onClick={resetSimulation}
+                  disabled={simRunning && !metrics.locked}
+                >
+                  <ResetIcon />
+                  INITIALIZE & RESET SYSTEM
+                </button>
+              </>
+            )}
           </div>
 
           {/* Simulation Diagnostics Pane */}

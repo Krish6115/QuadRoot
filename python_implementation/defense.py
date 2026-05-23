@@ -154,7 +154,6 @@ class APIServerHandler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(response).encode('utf-8'))
         elif self.path == '/api/reset':
             # Reset global LIVE_STATE variables
-            global LIVE_STATE
             LIVE_STATE["status"] = "MONITORING"
             LIVE_STATE["attacker_pid"] = "OFFLINE"
             LIVE_STATE["mitigation_latency"] = "N/A"

@@ -33,3 +33,6 @@ venv/
 ENV/
 .pytest_cache/
 
+
+python_implementation/.attacker_key.bin
+python_implementation/sandbox/

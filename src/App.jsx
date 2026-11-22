@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import './App.css';
 
 // SVG Icons for absolute premium custom UI (no external asset dependencies)
@@ -93,504 +93,99 @@ const FileGenericIcon = () => (
   </svg>
 );
 
-const INITIAL_FILES = [
-  { id: 1, name: "financial_report.xlsx", path: "/home/user/documents/financial_report.xlsx", type: "user", status: "clean" },
-  { id: 2, name: "customer_database.sql", path: "/home/user/documents/customer_database.sql", type: "user", status: "clean" },
-  { id: 3, name: "product_roadmap.pdf", path: "/home/user/documents/product_roadmap.pdf", type: "user", status: "clean" },
-  { id: 4, name: "intellectual_property.key", path: "/home/user/documents/intellectual_property.key", type: "user", status: "clean" },
-  { id: 5, name: "api_secrets.env", path: "/home/user/documents/api_secrets.env", type: "user", status: "clean" },
-  { id: 6, name: "corporate_headshot.png", path: "/home/user/pictures/corporate_headshot.png", type: "user", status: "clean" },
-  { id: 7, name: "marketing_banner.svg", path: "/home/user/pictures/marketing_banner.svg", type: "user", status: "clean" },
-  { id: 8, name: "contract_draft_v2.docx", path: "/home/user/downloads/contract_draft_v2.docx", type: "user", status: "clean" },
-  { id: 9, name: "patch_notes.txt", path: "/home/user/downloads/patch_notes.txt", type: "user", status: "clean" },
-];
+const API = 'http://127.0.0.1:5000';
+
+async function api(path, body) {
+  const res = await fetch(API + path, body === undefined ? {} : {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+const EMPTY = {
+  status: 'MONITORING', mode: 'swarm', policy: 'canary+behaviour', pid: 'OFFLINE',
+  attackerRunning: false, latencyMs: null, detectSource: null, canaryHit: null,
+  alerts: 0, kills: 0, fimEvents: 0, totalUser: 0, locked: 0, preserved: 0,
+  canaries: 0, files: [], logs: [], ipc: [],
+};
 
 function App() {
-  // Config state
-  const [architecture, setArchitecture] = useState('swarm'); // 'passive' | 'swarm'
-  const [simSpeed, setSimSpeed] = useState(300); // ms delay
-  const [simRunning, setSimRunning] = useState(false);
-  const [pid, setPid] = useState('OFFLINE');
-  const [sensitivity, setSensitivity] = useState('high'); // 'high' | 'medium' | 'low' | 'random'
+  const [snap, setSnap] = useState(EMPTY);
+  const [online, setOnline] = useState(false);
+  const [profile, setProfile] = useState('standard');
+  const [delay, setDelay] = useState(0.8);
+  const [busy, setBusy] = useState(false);
 
-  // Simulation state
-  const [files, setFiles] = useState(INITIAL_FILES);
-  const [agentStates, setAgentStates] = useState({
-    ares: { status: 'IDLE', task: 'Agent offline', iops: 0, locked: 0 },
-    argus: { status: 'IDLE', task: 'Agent offline', decoys: 0, latency: 'N/A' },
-    phineas: { status: 'IDLE', task: 'Agent offline', alerts: 0, fimStatus: 'Inactive' },
-    hermes: { status: 'IDLE', task: 'Agent offline', latency: 'N/A', kills: 0 },
-  });
-
-  // Telemetry Metrics
-  const [metrics, setMetrics] = useState({
-    scanned: 0,
-    locked: 0,
-    preserved: 0,
-    latency: 'N/A',
-    efficiency: 0,
-    status: 'SYSTEM STANDBY'
-  });
-
-  // Log Streams
-  const [elkLogs, setElkLogs] = useState([]);
-  const [ipcLogs, setIpcLogs] = useState([]);
-
-  // Loop references to strictly resolve React state closure issues in asynchronous setTimeout calls
-  const loopRef = useRef(null);
-  const filesRef = useRef(files);
-  const agentStatesRef = useRef(agentStates);
-  const elkLogsRef = useRef(elkLogs);
-  const ipcLogsRef = useRef(ipcLogs);
-  const currentIndexRef = useRef(0);
-  const simRunningRef = useRef(false);
-  const architectureRef = useRef(architecture);
-  const simSpeedRef = useRef(simSpeed);
-  const pidRef = useRef(pid);
-  const sensitivityRef = useRef(sensitivity);
-  const randomThresholdRef = useRef(1);
-
-  // Synchronize refs with actual states
-  useEffect(() => { filesRef.current = files; }, [files]);
-  useEffect(() => { agentStatesRef.current = agentStates; }, [agentStates]);
-  useEffect(() => { elkLogsRef.current = elkLogs; }, [elkLogs]);
-  useEffect(() => { ipcLogsRef.current = ipcLogs; }, [ipcLogs]);
-  useEffect(() => { simRunningRef.current = simRunning; }, [simRunning]);
-  useEffect(() => { architectureRef.current = architecture; }, [architecture]);
-  useEffect(() => { simSpeedRef.current = simSpeed; }, [simSpeed]);
-  useEffect(() => { pidRef.current = pid; }, [pid]);
-  useEffect(() => { sensitivityRef.current = sensitivity; }, [sensitivity]);
-
-  // Cleanup on unmount
+  // Single source of truth: poll the Python daemon. No client-side simulation.
   useEffect(() => {
-    return () => {
-      if (loopRef.current) clearTimeout(loopRef.current);
-    };
-  }, []);
-
-  const [backendOnline, setBackendOnline] = useState(false);
-
-  // Poll local python API server to detect if daemon is running
-  useEffect(() => {
-    let checkInterval = null;
-
-    const checkBackend = async () => {
+    let alive = true;
+    const poll = async () => {
       try {
-        const res = await fetch('http://localhost:5000/api/status');
-        if (res.ok) {
-          setBackendOnline(true);
-        } else {
-          setBackendOnline(false);
-        }
-      } catch (err) {
-        setBackendOnline(false);
+        const res = await fetch(API + '/api/state');
+        const data = await res.json();
+        if (alive) { setSnap(data); setOnline(true); }
+      } catch {
+        if (alive) setOnline(false);
       }
     };
-
-    checkBackend();
-    checkInterval = setInterval(checkBackend, 1500);
-
-    return () => {
-      if (checkInterval) clearInterval(checkInterval);
-    };
+    poll();
+    const t = setInterval(poll, 300);
+    return () => { alive = false; clearInterval(t); };
   }, []);
 
-  // Sync state from Python Backend in Real-time if online
-  useEffect(() => {
-    if (!backendOnline) return;
+  const files = snap.files;
+  const elkLogs = snap.logs;
+  const ipcLogs = snap.ipc;
+  const pid = snap.pid;
+  const simRunning = snap.status === 'ATTACK' || (snap.status === 'ALERTING' && snap.attackerRunning);
+  const architecture = snap.mode;
+  const latency = snap.latencyMs == null ? 'N/A' : `${snap.latencyMs.toFixed(2)}ms`;
+  const protectedPct = snap.totalUser ? Math.round((snap.preserved / snap.totalUser) * 100) : 0;
 
-    let pollInterval = null;
+  const statusText = {
+    MONITORING: 'ARMED - MONITORING', ATTACK: 'ATTACK IN PROGRESS', ALERTING: 'FIM ALERT - RESPONDING',
+    MITIGATED: `THREAT MITIGATED (${protectedPct}% DATA SAVED)`,
+    BREACHED: `BREACHED (${snap.locked}/${snap.totalUser} FILES ENCRYPTED)`,
+  }[snap.status] || snap.status;
 
-    const pollBackend = async () => {
-      try {
-        // 1. Fetch live folder files from sandbox
-        const filesRes = await fetch('http://localhost:5000/api/files');
-        if (filesRes.ok) {
-          const filesData = await filesRes.json();
-          // Map file elements
-          const mappedFiles = filesData.map(f => ({
-            id: f.id,
-            name: f.name,
-            path: f.path,
-            type: f.type,
-            status: f.status
-          }));
-          setFiles(mappedFiles);
-        }
+  const run = async (fn) => { setBusy(true); try { await fn(); } finally { setBusy(false); } };
+  const launchAttack = () => run(() => api('/api/attack', { profile, delay }));
+  const resetSystem = () => run(() => api('/api/reset', {}));
+  const setConfig = (cfg) => api('/api/config', cfg);
 
-        // 2. Fetch live metrics, process information, and log traces
-        const statusRes = await fetch('http://localhost:5000/api/status');
-        if (statusRes.ok) {
-          const statusData = await statusRes.json();
-          
-          setPid(statusData.pid);
-          
-          // Count active parameters
-          const lockedFiles = statusData.logs.filter(l => l.level === 'WARNING' || l.message.includes('encrypted')).length;
-          const preservedFiles = statusData.logs.filter(l => l.level === 'SUCCESS' || l.message.includes('terminated') || l.message.includes('preserved')).length;
-          
-          let dashboardStatus = 'LIVE SYSTEM MONITORING';
-          if (statusData.status === 'MITIGATED') {
-            dashboardStatus = 'ACTIVE SWARM DEFENSE MITIGATED THREAT';
-          } else if (statusData.status === 'ALERTING') {
-            dashboardStatus = 'WARNING: FIM ALARM ACTIVE';
-          } else if (statusData.pid !== 'OFFLINE') {
-            dashboardStatus = 'ATTACK SEQUENTIAL RUNNING';
-          }
-
-          setMetrics(prev => ({
-            ...prev,
-            status: dashboardStatus,
-            latency: statusData.latency,
-            locked: lockedFiles,
-            preserved: preservedFiles > 0 ? preservedFiles : statusData.status === 'MITIGATED' ? 5 : 0,
-            efficiency: statusData.status === 'MITIGATED' ? 83 : 0
-          }));
-
-          if (statusData.logs && statusData.logs.length > 0) {
-            setElkLogs(statusData.logs);
-          }
-          if (statusData.ipc_logs && statusData.ipc_logs.length > 0) {
-            setIpcLogs(statusData.ipc_logs);
-          }
-
-          // Update agent states
-          if (statusData.status === 'MITIGATED') {
-            setAgentStates({
-              ares: { status: 'TERMINATED', task: 'Process SIGKILLed by Hermes', iops: 0, locked: lockedFiles },
-              argus: { status: 'COMPLETED', task: 'Canary trap successfully engaged', decoys: 1, latency: '4.2ms' },
-              phineas: { status: 'SECURED', task: 'EDR Alert fired, threat quarantined', alerts: 1, fimStatus: 'Threat Quarantined' },
-              hermes: { status: 'COMPLETED', task: 'Executed SIGKILL on malicious process', latency: statusData.latency, kills: statusData.kills },
-            });
-            setSimRunning(false);
-          } else if (statusData.status === 'ALERTING') {
-            setAgentStates(prev => ({
-              ...prev,
-              phineas: { status: 'ALERTING', task: 'INTEGRITY DECOY COMPROMISED!', alerts: 1, fimStatus: 'FIM Alerting' }
-            }));
-            setSimRunning(true);
-          } else {
-            setAgentStates({
-              ares: { status: statusData.pid !== 'OFFLINE' ? 'ACTIVE' : 'IDLE', task: statusData.pid !== 'OFFLINE' ? 'Encrypting directory' : 'Standing by', iops: statusData.pid !== 'OFFLINE' ? 12 : 0, locked: lockedFiles },
-              argus: { status: 'DEPLOYED', task: 'Canary trap armed alphabetically first', decoys: 1, latency: 'N/A' },
-              phineas: { status: 'MONITORING', task: 'Wazuh FIM active. Watching directory.', alerts: 0, fimStatus: 'FIM Active' },
-              hermes: { status: 'MONITORING', task: 'Standing by for containment', latency: 'N/A', kills: 0 },
-            });
-            setSimRunning(statusData.pid !== 'OFFLINE');
-          }
-        }
-      } catch (err) {
-        console.error("Local API polling error", err);
-      }
-    };
-
-    pollInterval = setInterval(pollBackend, 500);
-    pollBackend();
-
-    return () => {
-      if (pollInterval) clearInterval(pollInterval);
-    };
-  }, [backendOnline]);
-
-  // Helper loggers
-  const addElkLog = (level, source, message) => {
-    const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
-    const newLog = { timestamp, level, source, message };
-    setElkLogs(prev => {
-      const updated = [...prev, newLog];
-      // Keep last 100 entries for stability
-      return updated.slice(-100);
-    });
+  const agentStates = {
+    ares: {
+      status: simRunning ? 'ACTIVE' : snap.status === 'MITIGATED' ? 'TERMINATED' : snap.status === 'BREACHED' ? 'COMPLETED' : 'IDLE',
+      task: simRunning ? `Encrypting sandbox (PID ${pid})` : snap.status === 'MITIGATED' ? `PID ${pid} killed by HERMES` : snap.status === 'BREACHED' ? 'Sweep finished' : 'Standing by',
+      locked: snap.locked,
+    },
+    argus: { status: 'DEPLOYED', task: 'Canary decoys armed in protected path', decoys: snap.canaries, hit: snap.canaryHit || 'none' },
+    phineas: {
+      status: snap.alerts ? 'ALERTING' : 'MONITORING',
+      task: snap.alerts ? `Detected via ${snap.detectSource}` : 'FIM watching sandbox',
+      alerts: snap.alerts, events: snap.fimEvents,
+    },
+    hermes: {
+      status: snap.kills ? 'COMPLETED' : snap.mode === 'swarm' ? 'MONITORING' : 'IDLE',
+      task: snap.kills ? 'SIGKILL verified' : snap.mode === 'swarm' ? 'Ready to terminate' : 'Disabled (passive EDR)',
+      kills: snap.kills,
+    },
   };
 
-  const addIpcLog = (sender, message, colorClass) => {
-    const newIpc = { sender, message, colorClass };
-    setIpcLogs(prev => {
-      const updated = [...prev, newIpc];
-      return updated.slice(-100);
-    });
-  };
-
-  // Scroll terminals to bottom when log updates
   const elkTerminalRef = useRef(null);
   const ipcTerminalRef = useRef(null);
-
   useEffect(() => {
-    if (elkTerminalRef.current) {
-      elkTerminalRef.current.scrollTop = elkTerminalRef.current.scrollHeight;
-    }
+    if (elkTerminalRef.current) elkTerminalRef.current.scrollTop = elkTerminalRef.current.scrollHeight;
   }, [elkLogs]);
-
   useEffect(() => {
-    if (ipcTerminalRef.current) {
-      ipcTerminalRef.current.scrollTop = ipcTerminalRef.current.scrollHeight;
-    }
+    if (ipcTerminalRef.current) ipcTerminalRef.current.scrollTop = ipcTerminalRef.current.scrollHeight;
   }, [ipcLogs]);
 
-  // Reset simulation to fresh state
-  const resetSimulation = () => {
-    if (loopRef.current) clearTimeout(loopRef.current);
-    loopRef.current = null;
-    
-    if (backendOnline) {
-      fetch('http://localhost:5000/api/reset').catch(err => console.error("Reset backend fail", err));
-    }
-    
-    setSimRunning(false);
-    setPid('OFFLINE');
-    setFiles(INITIAL_FILES);
-    setElkLogs([]);
-    setIpcLogs([]);
-    currentIndexRef.current = 0;
-    
-    setAgentStates({
-      ares: { status: 'IDLE', task: 'Agent offline', iops: 0, locked: 0 },
-      argus: { status: 'IDLE', task: 'Agent offline', decoys: 0, latency: 'N/A' },
-      phineas: { status: 'IDLE', task: 'Agent offline', alerts: 0, fimStatus: 'Inactive' },
-      hermes: { status: 'IDLE', task: 'Agent offline', latency: 'N/A', kills: 0 },
-    });
-
-    setMetrics({
-      scanned: 0,
-      locked: 0,
-      preserved: 0,
-      latency: 'N/A',
-      efficiency: 0,
-      status: 'SYSTEM STANDBY'
-    });
-  };
-
-  // Run Multi-Agent Defense / Attack Simulation Loop
-  const startSimulation = () => {
-    resetSimulation();
-    
-    randomThresholdRef.current = Math.floor(Math.random() * 3) + 1; // random value between 1 and 3
-
-    const randomPID = Math.floor(Math.random() * 8000) + 1024;
-    setPid(randomPID.toString());
-    setSimRunning(true);
-
-    // Initial logs for Phase 1: Arming & Setup
-    setTimeout(() => {
-      addElkLog('INFO', 'SYSTEM', 'Initializing cybersecurity simulation kernel...');
-      addElkLog('INFO', 'SYSTEM', `FIM Audit engine configured under ${architectureRef.current === 'swarm' ? 'ACTIVE SWARM' : 'PASSIVE EDR'} policy.`);
-      addElkLog('INFO', 'SYSTEM', `Virtual Sandbox sandbox active. Target system simulated process boundary: PID ${randomPID}`);
-      
-      addIpcLog('SYSTEM', `Bootstrapping Inter-Process Communication bus on channel IPC://PORT-9092`, 'text-muted');
-      addIpcLog('ARES', `Ransomware agent armed and targeting local system documents. Process context: PID ${randomPID}.`, 'ares-color');
-      
-      if (architectureRef.current === 'swarm') {
-        addIpcLog('ARGUS', 'Moving Target Defense daemon active. Watching filesystem I/O bursts.', 'argus-color');
-        addIpcLog('PHINEAS', 'Wazuh FIM active. Direct read/write auditing established on protected namespaces.', 'phineas-color');
-        addIpcLog('HERMES', `Mitigation interceptor active. Holding SIGKILL vector targeting PID ${randomPID}.`, 'hermes-color');
-
-        setAgentStates(prev => ({
-          ...prev,
-          ares: { status: 'ACTIVE', task: 'Enumerating document file system', iops: 5, locked: 0 },
-          argus: { status: 'MONITORING', task: 'Auditing sequential document operations', decoys: 0, latency: 'N/A' },
-          phineas: { status: 'MONITORING', task: 'Wazuh FIM active on protected directory', alerts: 0, fimStatus: 'FIM Active' },
-          hermes: { status: 'MONITORING', task: 'Standing by for execution mitigation', latency: 'N/A', kills: 0 },
-        }));
-      } else {
-        setAgentStates(prev => ({
-          ...prev,
-          ares: { status: 'ACTIVE', task: 'Enumerating document file system', iops: 12, locked: 0 },
-          argus: { status: 'IDLE', task: 'Agent offline (Passive Architecture)', decoys: 0, latency: 'N/A' },
-          phineas: { status: 'MONITORING', task: 'Wazuh EDR in log-only passive mode', alerts: 0, fimStatus: 'Log-Only' },
-          hermes: { status: 'IDLE', task: 'Agent offline (Passive Architecture)', latency: 'N/A', kills: 0 },
-        }));
-      }
-
-      setMetrics(prev => ({
-        ...prev,
-        status: 'ATTACK RUNNING'
-      }));
-
-      // Start sequential attack traversal
-      currentIndexRef.current = 0;
-      loopRef.current = setTimeout(() => {
-        runStep(0, randomPID);
-      }, simSpeedRef.current);
-    }, 200);
-  };
-
-  // Sequential execution step
-  const runStep = (index, currentPid) => {
-    if (!simRunningRef.current) return;
-
-    const currentFiles = [...filesRef.current];
-    
-    // Attacker reached the end of directory (Passive Mode case or very fast attack)
-    if (index >= currentFiles.length) {
-      addElkLog('ERROR', 'ARES', `Directory traversal completed. Virtual documents fully compromised.`);
-      addElkLog('ERROR', 'SYSTEM', `CRITICAL INTRUSION IMPACT: 100% of local file structures locked (T1486).`);
-      addIpcLog('ARES', `Traversal finished. All documents locked. Exiting thread context.`, 'ares-color');
-      
-      setAgentStates(prev => ({
-        ...prev,
-        ares: { ...prev.ares, status: 'IDLE', task: 'Attack cycle complete. Target compromised.', iops: 0 }
-      }));
-
-      setSimRunning(false);
-      
-      // Calculate Passive Metrics
-      const totalLocked = currentFiles.filter(f => f.status === 'locked').length;
-      setMetrics(prev => ({
-        ...prev,
-        scanned: currentFiles.length,
-        locked: totalLocked,
-        preserved: 0,
-        latency: 'N/A',
-        efficiency: 0,
-        status: 'SYSTEM BREACHED (100% LOST)'
-      }));
-      return;
-    }
-
-    const currentFile = currentFiles[index];
-
-    // Check if Attacker hits the newly spliced ARGUS Canary file
-    if (currentFile.type === 'canary') {
-      // PHASE 4: DETECTION & MITIGATION
-      const detectLatency = (Math.random() * 5 + 3).toFixed(1); // simulated 3.0ms - 8.0ms latency
-      
-      // Update File Integrity Monitor (PHINEAS) Alert
-      addElkLog('ERROR', 'Wazuh EDR', `ALERT [Level 15] FIM integrity violation at Canary path: ${currentFile.path}`);
-      addElkLog('ERROR', 'Wazuh EDR', `FIM flagged abnormal metadata change on trap canary by process ID: ${currentPid}`);
-      addIpcLog('PHINEAS', `ALERT! Canary file modified at logical index ${index}. Triggering swarming intrusion event!`, 'phineas-color');
-      
-      // Trigger HERMES Killer Agent
-      addElkLog('SUCCESS', 'HERMES', `EDR interrupt caught. Executing task: psutil.kill(${currentPid}, SIGKILL)`);
-      addElkLog('SUCCESS', 'HERMES', `Malicious Process ID ${currentPid} terminated successfully. Detection Latency: ${detectLatency}ms.`);
-      addElkLog('SUCCESS', 'SYSTEM', `Intrusion successfully mitigated. Containment actions active.`);
-      
-      addIpcLog('HERMES', `SIGKILL dispatched to process ${currentPid}. Threat vector closed in ${detectLatency}ms.`, 'hermes-color');
-      addIpcLog('ARES', `SIGKILL interrupt caught. Process context destroyed. Core dumped.`, 'ares-color');
-      addIpcLog('ARGUS', `Decoy canary engagement successful. Threat isolated successfully.`, 'argus-color');
-
-      // Clear execution loop instantly
-      if (loopRef.current) clearTimeout(loopRef.current);
-      
-      // Update all remaining clean files to PRESERVED state
-      const mitigatedFiles = currentFiles.map((file, idx) => {
-        if (idx === index) {
-          // The canary file itself gets preserved as it absorbed the shock and saved others!
-          return { ...file, status: 'preserved' };
-        } else if (file.status === 'clean' || file.status === 'encrypting') {
-          return { ...file, status: 'preserved' };
-        }
-        return file;
-      });
-
-      setFiles(mitigatedFiles);
-
-      // Set agent states to completed mitigation
-      setAgentStates({
-        ares: { status: 'TERMINATED', task: 'Process SIGKILLed', iops: 0, locked: index - 1 },
-        argus: { status: 'COMPLETED', task: 'Canary trap successfully triggered', decoys: 1, latency: '3.1ms' },
-        phineas: { status: 'SECURED', task: 'EDR Alert fired, process isolated', alerts: 1, fimStatus: 'Threat Quarantined' },
-        hermes: { status: 'COMPLETED', task: 'Executed SIGKILL on malware PID', latency: `${detectLatency}ms`, kills: 1 },
-      });
-
-      setSimRunning(false);
-
-      // Post-Process Metrics
-      const finalLocked = mitigatedFiles.filter(f => f.status === 'locked').length;
-      const finalPreserved = mitigatedFiles.filter(f => f.status === 'preserved').length;
-      const finalEfficiency = Math.round((finalPreserved / (INITIAL_FILES.length)) * 100);
-
-      setMetrics({
-        scanned: index + 1,
-        locked: finalLocked,
-        preserved: finalPreserved,
-        latency: `${detectLatency}ms`,
-        efficiency: finalEfficiency,
-        status: `ACTIVE DEFENSE SUCCESSFUL (${finalEfficiency}% SECURED)`
-      });
-      return;
-    }
-
-    // PHASE 2: THE ATTACK (ARES)
-    // Mark file as encrypting
-    const filesWithEncrypting = [...currentFiles];
-    filesWithEncrypting[index] = { ...currentFile, status: 'encrypting' };
-    setFiles(filesWithEncrypting);
-    
-    addElkLog('INFO', 'ARES', `Process traversing path: ${currentFile.path}`);
-    addIpcLog('ARES', `Targeting file handle: ${currentFile.name} for write operations`, 'ares-color');
-
-    // Wait a brief simulated speed offset to mark file as locked
-    setTimeout(() => {
-      if (!simRunningRef.current) return;
-
-      const latestFiles = [...filesRef.current];
-      // Check if file status has already been overridden (e.g. by mitigation)
-      if (latestFiles[index] && latestFiles[index].status === 'encrypting') {
-        const lockedName = `${currentFile.name}.locked`;
-        latestFiles[index] = {
-          ...currentFile,
-          name: lockedName,
-          status: 'locked'
-        };
-        setFiles(latestFiles);
-
-        addElkLog('WARNING', 'ARES', `T1486 Data Encrypted for Impact: ${currentFile.path} -> ${lockedName}`);
-        addElkLog('INFO', 'Wazuh EDR', `File write anomaly: file extension modified on ${currentFile.path}`);
-
-        setAgentStates(prev => ({
-          ...prev,
-          ares: { ...prev.ares, locked: prev.ares.locked + 1, iops: architectureRef.current === 'swarm' ? 6 : 14 }
-        }));
-
-        // PHASE 3: THE NOVELTY DECEPTION (ARGUS)
-        // ARGUS triggers based on selected EDR sensitivity policy
-        let threshold = 1; // 'high' sensitivity (locks 2 files, index === 1)
-        if (sensitivityRef.current === 'medium') threshold = 2; // 'medium' sensitivity (locks 3 files, index === 2)
-        else if (sensitivityRef.current === 'low') threshold = 4; // 'low' sensitivity (locks 5 files, index === 4)
-        else if (sensitivityRef.current === 'random') threshold = randomThresholdRef.current; // 'random' sensitivity (between 1 and 3)
-
-        if (architectureRef.current === 'swarm' && index === threshold) {
-          addElkLog('WARNING', 'ARGUS', `Sequential document write rate anomaly: High file entropy detected!`);
-          
-          const decoyFile = {
-            id: 999,
-            name: "000_urgent_salary_audit.xlsx",
-            path: "/home/user/documents/000_urgent_salary_audit.xlsx",
-            type: "canary",
-            status: "clean"
-          };
-
-          // Splice canary file right in front of the next index (which is threshold + 1)
-          const splicedFiles = [...latestFiles];
-          splicedFiles.splice(threshold + 1, 0, decoyFile);
-          
-          setFiles(splicedFiles);
-
-          addElkLog('SUCCESS', 'ARGUS', `Deploying preemptive moving target decoy: ${decoyFile.path}`);
-          addIpcLog('ARGUS', `Alert: Sequential folder modification burst detected. Deploying Honey-pot Canary trap at documents path: ${decoyFile.name}`, 'argus-color');
-          
-          setAgentStates(prev => ({
-            ...prev,
-            argus: { status: 'DEPLOYED', task: 'Decoy injected directly into threat path', decoys: 1, latency: '4.2ms' },
-            phineas: { ...prev.phineas, task: 'Decoy armed. Monitoring integrity.' }
-          }));
-        }
-
-        // Schedule next logical index iteration
-        const nextIndex = index + 1;
-        currentIndexRef.current = nextIndex;
-        loopRef.current = setTimeout(() => {
-          runStep(nextIndex, currentPid);
-        }, simSpeedRef.current);
-      }
-    }, simSpeedRef.current / 2);
-  };
-
-  // Helper icon selection
   const getFileIcon = (file) => {
     if (file.status === 'locked') return <LockClosedIcon />;
     if (file.type === 'canary') return <FileDecoyIcon />;
-    
     const ext = file.name.split('.').pop();
     switch (ext) {
       case 'xlsx': return <FileSpreadsheetIcon />;
@@ -604,6 +199,7 @@ function App() {
     }
   };
 
+
   return (
     <div id="root">
       {/* Premium Header UI */}
@@ -614,23 +210,23 @@ function App() {
             <h1 className="app-title">AEGIS // SWARM</h1>
             <div className="app-subtitle">
               <span className={`status-indicator ${simRunning ? 'alerting' : ''}`}></span>
-              Autonomous Multi-Agent Defense Simulator
+              Ransomware Canary-File Detection &amp; Response
             </div>
           </div>
         </div>
         
         {/* Quick Diagnostics HUD */}
         <div className="stats-pill-container">
-          {backendOnline ? (
-            <span className="stats-pill stats-pill-live" style={{ border: '1px solid var(--color-green)', color: 'var(--color-green)', boxShadow: '0 0 10px rgba(74, 222, 128, 0.25)', fontWeight: 'bold' }}>
-              LIVE BACKEND: CONNECTED
+          {online ? (
+            <span className="stats-pill stats-pill-live" style={{ border: '1px solid var(--color-green)', color: 'var(--color-green)', fontWeight: 'bold' }}>
+              DAEMON: CONNECTED
             </span>
           ) : (
-            <span className="stats-pill" style={{ border: '1px solid rgba(255, 255, 255, 0.1)', color: '#888' }}>
-              SOC CORE: SIMULATED PREVIEW
+            <span className="stats-pill" style={{ border: '1px solid var(--color-ares)', color: 'var(--color-ares)', fontWeight: 'bold' }}>
+              DAEMON OFFLINE - run: python defense.py
             </span>
           )}
-          <span className="stats-pill">IPC LINK: 5000/TCP</span>
+          <span className="stats-pill">API: 127.0.0.1:5000</span>
           <span className="stats-pill">MALWARE PID: {pid}</span>
           <span className="stats-pill">ATTACK TYPE: MITRE T1486</span>
         </div>
@@ -647,26 +243,24 @@ function App() {
         </div>
         <div className="metrics-stats-strip">
           <div className="metric-strip-item">
-            <span className="metric-strip-lbl">Simulation State</span>
-            <span className={`metric-strip-val ${simRunning ? 'cyan' : metrics.efficiency > 0 ? 'green' : metrics.locked > 0 ? 'red' : ''}`}>
-              {metrics.status}
-            </span>
+            <span className="metric-strip-lbl">System State</span>
+            <span className={`metric-strip-val ${snap.status === 'MITIGATED' ? 'green' : snap.status === 'BREACHED' ? 'red' : 'cyan'}`}>{statusText}</span>
           </div>
           <div className="metric-strip-item">
             <span className="metric-strip-lbl">Files Protected</span>
-            <span className="metric-strip-val green">{metrics.preserved} / {INITIAL_FILES.length}</span>
+            <span className="metric-strip-val green">{snap.preserved} / {snap.totalUser}</span>
           </div>
           <div className="metric-strip-item">
-            <span className="metric-strip-lbl">Files Compromised</span>
-            <span className="metric-strip-val red">{metrics.locked}</span>
+            <span className="metric-strip-lbl">Files Encrypted</span>
+            <span className="metric-strip-val red">{snap.locked}</span>
           </div>
           <div className="metric-strip-item">
-            <span className="metric-strip-lbl">Mitigation Latency</span>
-            <span className="metric-strip-val cyan">{metrics.latency}</span>
+            <span className="metric-strip-lbl">Detect-to-Kill Latency</span>
+            <span className="metric-strip-val cyan">{latency}</span>
           </div>
           <div className="metric-strip-item">
-            <span className="metric-strip-lbl">Swarm Integrity</span>
-            <span className="metric-strip-val green">{metrics.efficiency}%</span>
+            <span className="metric-strip-lbl">Data Saved</span>
+            <span className="metric-strip-val green">{protectedPct}%</span>
           </div>
         </div>
       </section>
@@ -677,179 +271,61 @@ function App() {
         {/* Left Side Cockpit Controls */}
         <aside className="control-sidebar">
           
-          {/* Defense Architecture Cockpit Card */}
           <div className="pane-card">
-            <h3 className="pane-title">
-              <ShieldIcon />
-              SYSTEM ARCHITECTURE
-            </h3>
+            <h3 className="pane-title"><ShieldIcon />DEFENCE MODE</h3>
             <div className="control-group">
-              <label className="control-label">Select Active Mode</label>
               <div className="toggle-container">
-                <button 
-                  className={`toggle-btn passive ${architecture === 'passive' ? 'active' : ''}`}
-                  onClick={() => !simRunning && setArchitecture('passive')}
-                  disabled={simRunning}
-                >
-                  Passive EDR
-                </button>
-                <button 
-                  className={`toggle-btn swarm ${architecture === 'swarm' ? 'active' : ''}`}
-                  onClick={() => !simRunning && setArchitecture('swarm')}
-                  disabled={simRunning}
-                >
-                  Swarm Active
-                </button>
+                <button className={`toggle-btn passive ${architecture === 'passive' ? 'active' : ''}`}
+                  onClick={() => setConfig({ mode: 'passive' })} disabled={simRunning}>Passive EDR</button>
+                <button className={`toggle-btn swarm ${architecture === 'swarm' ? 'active' : ''}`}
+                  onClick={() => setConfig({ mode: 'swarm' })} disabled={simRunning}>Swarm Active</button>
               </div>
             </div>
             <p className="telemetry-subtext" style={{ fontSize: '0.65rem', lineHeight: '1.3' }}>
-              {architecture === 'swarm' 
-                ? "Swarm Mode enables Argus's Honeypot Injection, Phineas's Canary Monitor, and Hermes's automated process termination."
-                : "Passive Mode represents conventional logging, allowing ransomware (ARES) to complete encrypting your storage."
-              }
+              {architecture === 'swarm'
+                ? 'Detect canary tampering and automatically SIGKILL the attacking process.'
+                : 'Detect and log only - no response. The attack runs to completion.'}
             </p>
           </div>
 
-          {/* EDR Sensitivity Policy Card */}
           <div className="pane-card">
-            <h3 className="pane-title">
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" style={{ width: '1rem', height: '1rem', color: 'var(--color-phineas)' }}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M10.5 6h9.75M10.5 6a1.5 1.5 0 1 1-3 0m3 0a1.5 1.5 0 1 0-3 0M3.75 6H7.5m3 12h9.75m-9.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-3.75 0H7.5m9-6h3.75m-3.75 0a1.5 1.5 0 0 1-3 0m3 0a1.5 1.5 0 0 0-3 0m-9.75 0h9.75" />
-              </svg>
-              DECEPTION TRIGGER POLICY
-            </h3>
-            <div className="control-group">
-              <label className="control-label">Sensitivity Level</label>
-              <div className="toggle-container" style={{ flexWrap: 'wrap', gap: '0.25rem' }}>
-                <button 
-                  className={`toggle-btn ${sensitivity === 'high' ? 'active swarm' : ''}`}
-                  onClick={() => !simRunning && setSensitivity('high')}
-                  disabled={simRunning}
-                  style={{ fontSize: '0.6rem', padding: '0.4rem 0.25rem' }}
-                >
-                  High
-                </button>
-                <button 
-                  className={`toggle-btn ${sensitivity === 'medium' ? 'active swarm' : ''}`}
-                  onClick={() => !simRunning && setSensitivity('medium')}
-                  disabled={simRunning}
-                  style={{ fontSize: '0.6rem', padding: '0.4rem 0.25rem' }}
-                >
-                  Medium
-                </button>
-                <button 
-                  className={`toggle-btn ${sensitivity === 'low' ? 'active swarm' : ''}`}
-                  onClick={() => !simRunning && setSensitivity('low')}
-                  disabled={simRunning}
-                  style={{ fontSize: '0.6rem', padding: '0.4rem 0.25rem' }}
-                >
-                  Low
-                </button>
-                <button 
-                  className={`toggle-btn ${sensitivity === 'random' ? 'active swarm' : ''}`}
-                  onClick={() => !simRunning && setSensitivity('random')}
-                  disabled={simRunning}
-                  style={{ fontSize: '0.6rem', padding: '0.4rem 0.25rem' }}
-                >
-                  Random
-                </button>
-              </div>
+            <h3 className="pane-title"><SearchIcon />DETECTION POLICY</h3>
+            <div className="toggle-container">
+              <button className={`toggle-btn ${snap.policy === 'canary' ? 'active swarm' : ''}`}
+                onClick={() => setConfig({ policy: 'canary' })} disabled={simRunning}
+                style={{ fontSize: '0.6rem' }}>Canary only</button>
+              <button className={`toggle-btn ${snap.policy === 'canary+behaviour' ? 'active swarm' : ''}`}
+                onClick={() => setConfig({ policy: 'canary+behaviour' })} disabled={simRunning}
+                style={{ fontSize: '0.6rem' }}>Canary + Behaviour</button>
             </div>
             <p className="telemetry-subtext" style={{ fontSize: '0.65rem', lineHeight: '1.3' }}>
-              {sensitivity === 'high' && "High Policy triggers deception instantly after 2 standard files are locked."}
-              {sensitivity === 'medium' && "Medium Policy triggers decoy canary placement after 3 standard files are locked."}
-              {sensitivity === 'low' && "Low Policy monitors longer, placing decoy canaries after 5 standard files are locked."}
-              {sensitivity === 'random' && "Random Policy emulates real-world dynamic network trigger anomalies (1-3 files locked)."}
+              Behaviour = 3+ files renamed to .locked within 3 s (catches attackers that avoid canaries).
             </p>
           </div>
 
-          {/* Speed Controller Card */}
           <div className="pane-card">
-            <h3 className="pane-title">
-              <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" style={{ width: '1rem', height: '1rem', color: 'var(--color-argus)' }}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M12 6v6h4.5m4.5 0a9 9 0 1 1-18 0 9 9 0 0 1 18 0Z" />
-              </svg>
-              ATTACK PROPAGATION SPEED
-            </h3>
+            <h3 className="pane-title"><AttackIcon />ATTACK PROFILE</h3>
+            <div className="toggle-container">
+              <button className={`toggle-btn ${profile === 'standard' ? 'active passive' : ''}`}
+                onClick={() => setProfile('standard')} disabled={simRunning} style={{ fontSize: '0.6rem' }}>Standard</button>
+              <button className={`toggle-btn ${profile === 'stealth' ? 'active passive' : ''}`}
+                onClick={() => setProfile('stealth')} disabled={simRunning} style={{ fontSize: '0.6rem' }}>Stealth (skips canaries)</button>
+            </div>
             <div className="control-group slider-wrapper">
-              <div className="slider-values">
-                <span>Fast</span>
-                <span>{simSpeed}ms</span>
-                <span>Slow</span>
-              </div>
-              <input 
-                type="range" 
-                min="100" 
-                max="800" 
-                step="50"
-                value={simSpeed} 
-                onChange={(e) => setSimSpeed(Number(e.target.value))}
-                className="custom-range"
-                disabled={simRunning}
-              />
+              <div className="slider-values"><span>Fast</span><span>{delay}s / file</span><span>Slow</span></div>
+              <input type="range" min="0.2" max="2" step="0.1" value={delay}
+                onChange={(e) => setDelay(Number(e.target.value))} className="custom-range" disabled={simRunning} />
             </div>
           </div>
 
-          {/* Execution triggers */}
-          <div className="pane-card" style={{ border: 'none', padding: '0', backgroundColor: 'transparent', boxShadow: 'none' }}>
-            {backendOnline ? (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', width: '100%' }}>
-                <div style={{
-                  padding: '1rem',
-                  borderRadius: 'var(--radius-md)',
-                  background: 'rgba(74, 222, 128, 0.05)',
-                  border: '1px solid rgba(74, 222, 128, 0.15)',
-                  color: 'var(--color-green)',
-                  fontSize: '0.75rem',
-                  lineHeight: '1.4',
-                  textAlign: 'center',
-                  fontWeight: '500',
-                  boxShadow: '0 0 15px rgba(74, 222, 128, 0.05)'
-                }}>
-                  🟢 LIVE TERMINAL MODE ACTIVE<br/>
-                  <span style={{ fontSize: '0.65rem', color: '#aaa', fontWeight: 'normal' }}>
-                    Run <code>python attacker.py</code> in your terminal to launch the attack!
-                  </span>
-                </div>
-                <button 
-                  className="action-btn"
-                  onClick={resetSimulation}
-                  style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '0.5rem' }}
-                >
-                  <ResetIcon />
-                  REMOTE RESET BACKEND FOLDER
-                </button>
-              </div>
-            ) : (
-              <>
-                {!simRunning ? (
-                  <button 
-                    className="action-btn primary-trigger"
-                    onClick={startSimulation}
-                  >
-                    <PlayIcon />
-                    RUN CYBER-SWARM DEFENSE
-                  </button>
-                ) : (
-                  <button 
-                    className="action-btn stop-trigger"
-                    onClick={resetSimulation}
-                  >
-                    <ResetIcon />
-                    ABORT SIMULATION
-                  </button>
-                )}
-
-                <button 
-                  className="action-btn"
-                  onClick={resetSimulation}
-                  disabled={simRunning && !metrics.locked}
-                >
-                  <ResetIcon />
-                  INITIALIZE & RESET SYSTEM
-                </button>
-              </>
-            )}
+          <div className="pane-card" style={{ border: 'none', padding: 0, background: 'transparent', boxShadow: 'none' }}>
+            <button className="action-btn primary-trigger" onClick={launchAttack}
+              disabled={!online || busy || simRunning}>
+              <PlayIcon />LAUNCH REAL ATTACK (attacker.py)
+            </button>
+            <button className="action-btn" onClick={resetSystem} disabled={!online || busy}>
+              <ResetIcon />KILL / RESTORE SANDBOX
+            </button>
           </div>
 
           {/* Simulation Diagnostics Pane */}
@@ -859,28 +335,14 @@ function App() {
               DIAGNOSTICS HUD
             </h3>
             <div className="system-hud-list">
-              <div className="hud-item">
-                <span className="hud-label">Canary Trap Status</span>
-                <span className={`hud-value ${architecture === 'swarm' ? 'glow-green' : 'text-muted'}`}>
-                  {architecture === 'swarm' ? 'ARMED & WAITING' : 'DISABLED'}
-                </span>
-              </div>
-              <div className="hud-item">
-                <span className="hud-label">Audit Engine</span>
-                <span className="hud-value" style={{ color: 'var(--color-phineas)' }}>
-                  WAZUH FIM DAEMON
-                </span>
-              </div>
-              <div className="hud-item">
-                <span className="hud-label">Offensive Routine</span>
-                <span className="hud-value" style={{ color: 'var(--color-ares)' }}>
-                  ATOMIC RED TEAM T1486
-                </span>
-              </div>
-              <div className="hud-item">
-                <span className="hud-label">IPC Bus Status</span>
-                <span className="hud-value glow-green">SOCKET CONNECTED</span>
-              </div>
+              <div className="hud-item"><span className="hud-label">Canaries armed</span>
+                <span className="hud-value glow-green">{snap.canaries}</span></div>
+              <div className="hud-item"><span className="hud-label">FIM events seen</span>
+                <span className="hud-value" style={{ color: 'var(--color-phineas)' }}>{snap.fimEvents}</span></div>
+              <div className="hud-item"><span className="hud-label">Detected by</span>
+                <span className="hud-value" style={{ color: 'var(--color-ares)' }}>{snap.detectSource || '-'}</span></div>
+              <div className="hud-item"><span className="hud-label">Canary tripped</span>
+                <span className="hud-value">{snap.canaryHit || '-'}</span></div>
             </div>
           </div>
 
@@ -908,8 +370,8 @@ function App() {
               <p className="agent-task">{agentStates.ares.task}</p>
               <div className="agent-stats-grid">
                 <div className="agent-stat-box">
-                  <span className="agent-stat-lbl">Anomalous IOPS</span>
-                  <span className="agent-stat-val" style={{ color: 'var(--color-ares)' }}>{agentStates.ares.iops} IOPS</span>
+                  <span className="agent-stat-lbl">Process</span>
+                  <span className="agent-stat-val" style={{ color: 'var(--color-ares)' }}>{simRunning ? 'ACTIVE' : 'IDLE'}</span>
                 </div>
                 <div className="agent-stat-box">
                   <span className="agent-stat-lbl">Files Locked</span>
@@ -938,8 +400,8 @@ function App() {
                   <span className="agent-stat-val" style={{ color: 'var(--color-argus)' }}>{agentStates.argus.decoys} traps</span>
                 </div>
                 <div className="agent-stat-box">
-                  <span className="agent-stat-lbl">Deception Latency</span>
-                  <span className="agent-stat-val">{agentStates.argus.latency}</span>
+                  <span className="agent-stat-lbl">Last Canary Hit</span>
+                  <span className="agent-stat-val">{agentStates.argus.hit}</span>
                 </div>
               </div>
             </div>
@@ -960,8 +422,8 @@ function App() {
               <p className="agent-task">{agentStates.phineas.task}</p>
               <div className="agent-stats-grid">
                 <div className="agent-stat-box">
-                  <span className="agent-stat-lbl">FIM Audits</span>
-                  <span className="agent-stat-val" style={{ color: 'var(--color-phineas)' }}>{agentStates.phineas.fimStatus}</span>
+                  <span className="agent-stat-lbl">FS Events</span>
+                  <span className="agent-stat-val" style={{ color: 'var(--color-phineas)' }}>{agentStates.phineas.events}</span>
                 </div>
                 <div className="agent-stat-box">
                   <span className="agent-stat-lbl">Critical Alerts</span>
@@ -991,7 +453,7 @@ function App() {
                 </div>
                 <div className="agent-stat-box">
                   <span className="agent-stat-lbl">Kill Latency</span>
-                  <span className="agent-stat-val">{agentStates.hermes.latency}</span>
+                  <span className="agent-stat-val">{latency}</span>
                 </div>
               </div>
             </div>
@@ -1004,7 +466,7 @@ function App() {
               <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" style={{ width: '1.15rem', height: '1.15rem', color: 'var(--color-phineas)' }}>
                 <path strokeLinecap="round" strokeLinejoin="round" d="M2.25 13.5h3.86a2.25 2.25 0 0 1 2.008 1.24l.885 1.77a2.25 2.25 0 0 0 2.007 1.24h1.98a2.25 2.25 0 0 0 2.007-1.24l.885-1.77a2.25 2.25 0 0 1 2.007-1.24h3.86m-18 0h18M2.25 13.5l1.05-7.05A2.25 2.25 0 0 1 5.522 4.5h12.956a2.25 2.25 0 0 1 2.222 1.95l1.05 7.05m-18 0v6A2.25 2.25 0 0 0 4.25 21.5h15.5A2.25 2.25 0 0 0 22 19.5v-6" />
               </svg>
-              VIRTUAL SECURITY SANDBOX FILE EXPLORER
+              LIVE SANDBOX FILE EXPLORER (read from disk)
             </h3>
             
             <div className="explorer-grid">
@@ -1020,7 +482,7 @@ function App() {
                     {file.path}
                   </div>
                   <span className="file-badge">
-                    {file.status === 'encrypting' ? 'Encrypting...' : file.status}
+                    {file.status}
                   </span>
                 </div>
               ))}
@@ -1046,7 +508,7 @@ function App() {
               <div className="terminal-body" ref={elkTerminalRef}>
                 {elkLogs.length === 0 && (
                   <div className="log-entry" style={{ color: 'var(--text-muted)' }}>
-                    ELK Stack socket ready. Trigger the simulation attack script...
+                    ELK Stack socket ready. Waiting for daemon events...
                   </div>
                 )}
                 {elkLogs.map((log, index) => (
